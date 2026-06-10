@@ -1,0 +1,19 @@
+[Unit]
+Description=Remember Bot (нагадування та нотатки)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Якщо боти крутяться під окремим користувачем — заміни на нього (напр. botuser)
+User=root
+WorkingDirectory=/opt/remember-bot
+# venv усередині папки проєкту — повна ізоляція від інших ботів
+ExecStart=/opt/remember-bot/.venv/bin/python /opt/remember-bot/bot.py
+Restart=always
+RestartSec=5
+# Підвантажує BOT_TOKEN та інші змінні (можна замість .env у коді)
+EnvironmentFile=/opt/remember-bot/.env
+
+[Install]
+WantedBy=multi-user.target
