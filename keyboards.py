@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aiogram.types import (
+    InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
@@ -14,6 +15,37 @@ from utils.format import PRIORITY_LABEL
 COUNT_OPTIONS = [1, 2, 3, 5, 10]
 INTERVAL_OPTIONS = [1, 2, 3, 5, 10, 15, 30, 60]
 PRIORITY_OPTIONS = [0, 1, 2]
+REMIND_DAYS_OPTIONS = [1, 2, 3, 5, 7, 14]
+PAGE_SIZE = 8
+
+
+def paginated_kb(
+    rows: list[tuple[int, str]], page: int, open_prefix: str, page_prefix: str,
+    clear_cb: str | None = None, clear_label: str | None = None,
+    footer: list[tuple[str, str]] | None = None,
+) -> InlineKeyboardMarkup:
+    """Загальний список з пагінацією. rows = [(id, підпис), ...]."""
+    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    kb_rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=label, callback_data=f"{open_prefix}{iid}")]
+        for iid, label in chunk
+    ]
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"{page_prefix}{page - 1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"{page_prefix}{page + 1}"))
+    if nav:
+        kb_rows.append(nav)
+    for text, cb in (footer or []):
+        kb_rows.append([InlineKeyboardButton(text=text, callback_data=cb)])
+    if clear_cb:
+        kb_rows.append([InlineKeyboardButton(text=clear_label, callback_data=clear_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 def cycle(options: list[int], current: int) -> int:
@@ -36,10 +68,11 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="➕ Нагадування"), KeyboardButton(text="📝 Нотатка")],
             [KeyboardButton(text="⏰ Мої нагадування"), KeyboardButton(text="📒 Мої нотатки")],
-            [KeyboardButton(text="✅ Чеклісти"), KeyboardButton(text="🎯 Дедлайн")],
-            [KeyboardButton(text="⭐ Шаблони"), KeyboardButton(text="📅 На сьогодні")],
-            [KeyboardButton(text="🔍 Пошук"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="⚙️ Налаштування"), KeyboardButton(text="❓ Допомога")],
+            [KeyboardButton(text="💳 Підписки"), KeyboardButton(text="✅ Чеклісти")],
+            [KeyboardButton(text="🎯 Дедлайн"), KeyboardButton(text="⭐ Шаблони")],
+            [KeyboardButton(text="📅 На сьогодні"), KeyboardButton(text="🔍 Пошук")],
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Налаштування")],
+            [KeyboardButton(text="❓ Допомога")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Напиши нагадування, нотатку або надішли фото/голос…",
@@ -160,6 +193,30 @@ def done_kb() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text="✔️ Готово"), KeyboardButton(text="↩️ Скасувати")]],
         resize_keyboard=True,
     )
+
+
+def sub_cycle_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📅 Щомісяця", callback_data="sub_cycle:monthly")
+    kb.button(text="🗓 Щороку", callback_data="sub_cycle:yearly")
+    kb.button(text="🔁 Щотижня", callback_data="sub_cycle:weekly")
+    kb.adjust(3)
+    return kb.as_markup()
+
+
+def sub_card_kb(sub) -> InlineKeyboardMarkup:
+    sid = sub["id"]
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Оплачено (наступний період)", callback_data=f"sub_paid:{sid}")
+    kb.button(text=f"🔔 Нагадати за {sub['remind_days']} дн", callback_data=f"sub_remind:{sid}")
+    trial = "🎁 Прибрати пробний" if sub["trial_end"] else "🎁 Додати пробний період"
+    kb.button(text=trial, callback_data=f"sub_trial:{sid}")
+    kb.button(text="✏️ Назва", callback_data=f"sub_edit:{sid}:name")
+    kb.button(text="✏️ Сума", callback_data=f"sub_edit:{sid}:amount")
+    kb.button(text="🗑 Видалити", callback_data=f"sub_del:{sid}")
+    kb.button(text="← Список", callback_data="subs_pg:0")
+    kb.adjust(1, 1, 1, 2, 1, 1)
+    return kb.as_markup()
 
 
 def tz_kb(zones: list[str]) -> InlineKeyboardMarkup:

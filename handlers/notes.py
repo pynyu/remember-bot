@@ -8,15 +8,55 @@ from aiogram.types import CallbackQuery, Message
 
 import database as db
 from handlers.media import extract_media, send_note
-from keyboards import cancel_kb, confirm_delete, main_menu, note_actions
+from keyboards import (
+    cancel_kb,
+    confirm_delete,
+    main_menu,
+    note_actions,
+    paginated_kb,
+)
 from states import AddNote, EditNote, SearchNotes
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 router = Router()
+
+_MEDIA_ICON = {
+    "photo": "🖼 ", "voice": "🎤 ", "document": "📎 ",
+    "audio": "🎵 ", "video": "🎬 ", "video_note": "🎥 ",
+}
 
 
 def _format_note(text: str, pinned: bool) -> str:
     pin = "📌 " if pinned else ""
     return f"{pin}{text}"
+
+
+def _preview(n) -> str:
+    pin = "📌 " if n["pinned"] else ""
+    media = _MEDIA_ICON.get(n["media_type"], "")
+    text = (n["text"] or "").replace("\n", " ").strip() or "(вкладення)"
+    if len(text) > 30:
+        text = text[:30] + "…"
+    return f"{pin}{media}{text}"
+
+
+async def _notes_list(user_id: int, page: int):
+    notes = await db.list_notes(user_id)
+    rows = [(n["id"], _preview(n)) for n in notes]
+    kb = paginated_kb(
+        rows, page, "note_open:", "notes_pg:",
+        clear_cb="notes_clear" if rows else None,
+        clear_label="🗑 Видалити всі нотатки",
+    )
+    if notes:
+        text = (
+            f"📒 <b>Твої нотатки ({len(notes)})</b>\n"
+            "Натисни нотатку, щоб відкрити її повністю:"
+        )
+    else:
+        text = ("Нотаток поки немає. Надішли текст, фото, голосове чи файл — "
+                "і я збережу його. ✨")
+    return text, kb
 
 
 @router.message(F.text == "📝 Нотатка")
@@ -45,17 +85,50 @@ async def add_note_text(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "📒 Мої нотатки")
 async def list_notes(message: Message) -> None:
     await db.ensure_user(message.from_user.id, message.from_user.username)
-    rows = await db.list_notes(message.from_user.id)
-    if not rows:
-        await message.answer(
-            "Нотаток поки немає. Напиши будь-який текст без часу — і я збережу його. "
-            "Можна надсилати фото, голосові та файли.",
-            reply_markup=main_menu(),
-        )
+    text, kb = await _notes_list(message.from_user.id, 0)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("notes_pg:"))
+async def cb_notes_page(call: CallbackQuery) -> None:
+    page = int(call.data.split(":")[1])
+    text, kb = await _notes_list(call.from_user.id, page)
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("note_open:"))
+async def cb_note_open(call: CallbackQuery) -> None:
+    nid = int(call.data.split(":")[1])
+    n = await db.get_note(call.from_user.id, nid)
+    if not n:
+        await call.answer("Нотатку не знайдено.", show_alert=True)
         return
-    await message.answer(f"📒 <b>Твої нотатки ({len(rows)}):</b>")
-    for n in rows:
-        await send_note(message, n, reply_markup=note_actions(n["id"], bool(n["pinned"])))
+    await send_note(call.message, n, reply_markup=note_actions(nid, bool(n["pinned"])))
+    await call.answer()
+
+
+@router.callback_query(F.data == "notes_clear")
+async def cb_notes_clear(call: CallbackQuery) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Так, видалити всі", callback_data="notes_clear_yes"),
+        InlineKeyboardButton(text="↩️ Ні", callback_data="notes_pg:0"),
+    ]])
+    await call.message.edit_text(
+        "⚠️ <b>Видалити ВСІ нотатки?</b>\nЦю дію не можна скасувати.",
+        reply_markup=kb,
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "notes_clear_yes")
+async def cb_notes_clear_yes(call: CallbackQuery) -> None:
+    n = await db.delete_all_notes(call.from_user.id)
+    await call.message.edit_text(f"🗑 Видалено нотаток: {n}.")
+    await call.answer("Готово")
 
 
 @router.message(F.text == "🔍 Пошук")

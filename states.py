@@ -41,3 +41,18 @@ class NewDeadline(StatesGroup):
 
 class SetDigest(StatesGroup):
     waiting_time = State()
+
+
+class AddSub(StatesGroup):
+    name = State()
+    amount = State()
+    cycle = State()
+    next_date = State()
+
+
+class EditSub(StatesGroup):
+    waiting_value = State()
+
+
+class TrialSub(StatesGroup):
+    waiting_date = State()

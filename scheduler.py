@@ -63,6 +63,10 @@ async def poll_due(now: datetime | None = None) -> None:
         await _check_digests(now)
     except Exception as e:
         log.exception("Помилка дайджесту: %s", e)
+    try:
+        await _check_subscriptions(now)
+    except Exception as e:
+        log.exception("Помилка перевірки підписок: %s", e)
 
 
 async def _check_digests(now: datetime) -> None:
@@ -115,6 +119,80 @@ async def _send_digest(u, now: datetime) -> None:
         await _bot.send_message(u["user_id"], "\n".join(lines))
     except Exception as e:
         log.warning("Не вдалося надіслати дайджест %s: %s", u["user_id"], e)
+
+
+async def _check_subscriptions(now: datetime) -> None:
+    """Нагадування про оплату підписки та кінець пробного періоду."""
+    from datetime import datetime as _dt, timedelta as _td
+
+    subs = await db.all_active_subscriptions()
+    tz_cache: dict[int, ZoneInfo] = {}
+    for s in subs:
+        uid = s["user_id"]
+        if uid not in tz_cache:
+            try:
+                tz_cache[uid] = ZoneInfo(await db.get_tz(uid))
+            except Exception:
+                tz_cache[uid] = ZoneInfo("Europe/Kyiv")
+        local = now.astimezone(tz_cache[uid])
+
+        # --- нагадування про оплату (за remind_days днів, о 09:00) ---
+        if s["pay_reminded"] != s["next_date"]:
+            try:
+                pay_d = _dt.strptime(s["next_date"], "%Y-%m-%d").date()
+                remind_on = pay_d - _td(days=s["remind_days"])
+                trigger = local.replace(hour=9, minute=0, second=0, microsecond=0)
+                trigger = trigger.replace(
+                    year=remind_on.year, month=remind_on.month, day=remind_on.day
+                )
+                if local >= trigger:
+                    days_left = (pay_d - local.date()).days
+                    when = "сьогодні" if days_left == 0 else (
+                        "завтра" if days_left == 1 else f"через {days_left} дн")
+                    await _notify(
+                        s["user_id"],
+                        f"💳 <b>Скоро оплата підписки</b>\n\n"
+                        f"<b>{s['name']}</b> — {_amount(s)}\n"
+                        f"📆 Оплата {when} ({s['next_date']}).\n\n"
+                        f"Коли оплатиш — відкрий 💳 Підписки → «✅ Оплачено».",
+                    )
+                    await db.update_subscription(s["id"], "pay_reminded", s["next_date"])
+            except Exception as e:
+                log.warning("sub pay reminder %s: %s", s["id"], e)
+
+        # --- нагадування про кінець пробного періоду (за день, о 09:00) ---
+        if s["trial_end"] and not s["trial_reminded"]:
+            try:
+                trial_d = _dt.strptime(s["trial_end"], "%Y-%m-%d").date()
+                remind_on = trial_d - _td(days=1)
+                trigger = local.replace(
+                    hour=9, minute=0, second=0, microsecond=0
+                ).replace(year=remind_on.year, month=remind_on.month, day=remind_on.day)
+                if local >= trigger:
+                    await _notify(
+                        s["user_id"],
+                        f"🎁 <b>Закінчується пробний період!</b>\n\n"
+                        f"<b>{s['name']}</b> — пробний до {s['trial_end']}.\n"
+                        f"⚠️ Якщо не плануєш платити — скасуй <u>зараз</u>, "
+                        f"щоб не списали {_amount(s)}.",
+                    )
+                    await db.update_subscription(s["id"], "trial_reminded", 1)
+            except Exception as e:
+                log.warning("sub trial reminder %s: %s", s["id"], e)
+
+
+def _amount(s) -> str:
+    a = s["amount"]
+    a = int(a) if a == int(a) else round(a, 2)
+    return f"{a} {s['currency']}"
+
+
+async def _notify(user_id: int, text: str) -> None:
+    assert _bot is not None
+    try:
+        await _bot.send_message(user_id, text)
+    except Exception as e:
+        log.warning("Не вдалося надіслати %s: %s", user_id, e)
 
 
 async def _send(r, now: datetime, ping_no: int, total: int) -> None:

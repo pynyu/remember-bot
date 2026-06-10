@@ -10,6 +10,7 @@ from . import (
     reminders,
     settings,
     smart,
+    subscriptions,
     templates,
 )
 
@@ -23,6 +24,7 @@ def setup_routers() -> Router:
     root.include_router(checklists.router)
     root.include_router(templates.router)
     root.include_router(deadline.router)
+    root.include_router(subscriptions.router)
     root.include_router(notes.router)
     root.include_router(media.router)
     root.include_router(smart.router)

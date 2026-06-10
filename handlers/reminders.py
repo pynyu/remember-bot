@@ -17,6 +17,7 @@ from keyboards import (
     cycle,
     fmt_interval,
     main_menu,
+    paginated_kb,
     reminder_card,
 )
 from states import AddReminder
@@ -105,28 +106,91 @@ async def add_reminder_text(message: Message, state: FSMContext) -> None:
         )
 
 
+def _rem_preview(r, tz: str) -> str:
+    prio = "🔴 " if r["priority"] == 2 else ("🔇 " if r["priority"] == 0 else "")
+    rep = "🔁 " if r["repeat"] != "none" else ""
+    text = (r["text"] or "").replace("\n", " ").strip() or "Нагадування"
+    if len(text) > 24:
+        text = text[:24] + "…"
+    return f"{prio}{rep}{text} · {human_left(r['base_at'], tz)}"
+
+
+async def _reminders_list(user_id: int, page: int):
+    tz = await db.get_tz(user_id)
+    rows = await db.list_reminders(user_id)
+    items = [(r["id"], _rem_preview(r, tz)) for r in rows]
+    kb = paginated_kb(
+        items, page, "rem_open:", "rems_pg:",
+        clear_cb="rems_clear" if items else None,
+        clear_label="🗑 Видалити всі нагадування",
+    )
+    if rows:
+        text = (
+            f"⏰ <b>Активні нагадування ({len(rows)})</b>\n"
+            "Натисни, щоб відкрити й налаштувати:"
+        )
+    else:
+        text = ("У тебе немає активних нагадувань.\n"
+                "Напиши, наприклад: <i>завтра о 9:00 зустріч</i>")
+    return text, kb
+
+
 @router.message(Command("reminders"))
 @router.message(F.text == "⏰ Мої нагадування")
 async def list_reminders(message: Message) -> None:
     await db.ensure_user(message.from_user.id, message.from_user.username)
-    tz = await db.get_tz(message.from_user.id)
-    rows = await db.list_reminders(message.from_user.id)
-    if not rows:
-        await message.answer(
-            "У тебе немає активних нагадувань.\n"
-            "Напиши, наприклад: <i>завтра о 9:00 зустріч</i>",
-            reply_markup=main_menu(),
-        )
+    text, kb = await _reminders_list(message.from_user.id, 0)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("rems_pg:"))
+async def cb_rems_page(call: CallbackQuery) -> None:
+    page = int(call.data.split(":")[1])
+    text, kb = await _reminders_list(call.from_user.id, page)
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("rem_open:"))
+async def cb_rem_open(call: CallbackQuery) -> None:
+    rid = int(call.data.split(":")[1])
+    r = await db.get_reminder(rid)
+    if not r or not r["active"]:
+        await call.answer("Нагадування вже неактивне.", show_alert=True)
         return
-    await message.answer(f"⏰ <b>Активні нагадування ({len(rows)}):</b>")
-    for r in rows:
-        repeat_note = "" if r["repeat"] == "none" else f" · 🔁 {REPEAT_LABELS[r['repeat']]}"
-        prio = "🔴 " if r["priority"] == 2 else ("🔇 " if r["priority"] == 0 else "")
-        await message.answer(
-            f"{prio}<b>{r['text']}</b>\n"
-            f"🕒 {fmt_dt(r['base_at'], tz)} ({human_left(r['base_at'], tz)}){repeat_note}",
-            reply_markup=reminder_card(r),
-        )
+    tz = await db.get_tz(call.from_user.id)
+    repeat_note = "" if r["repeat"] == "none" else f" · 🔁 {REPEAT_LABELS[r['repeat']]}"
+    prio = "🔴 " if r["priority"] == 2 else ("🔇 " if r["priority"] == 0 else "")
+    await call.message.answer(
+        f"{prio}<b>{r['text']}</b>\n"
+        f"🕒 {fmt_dt(r['base_at'], tz)} ({human_left(r['base_at'], tz)}){repeat_note}",
+        reply_markup=reminder_card(r),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "rems_clear")
+async def cb_rems_clear(call: CallbackQuery) -> None:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Так, видалити всі", callback_data="rems_clear_yes"),
+        InlineKeyboardButton(text="↩️ Ні", callback_data="rems_pg:0"),
+    ]])
+    await call.message.edit_text(
+        "⚠️ <b>Видалити ВСІ активні нагадування?</b>\nЦю дію не можна скасувати.",
+        reply_markup=kb,
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "rems_clear_yes")
+async def cb_rems_clear_yes(call: CallbackQuery) -> None:
+    n = await db.delete_all_reminders(call.from_user.id)
+    await call.message.edit_text(f"🗑 Видалено нагадувань: {n}.")
+    await call.answer("Готово")
 
 
 # ---------------------------------------------------- налаштування картки

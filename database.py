@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS templates (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        INTEGER NOT NULL,
+    name           TEXT NOT NULL,
+    amount         REAL NOT NULL DEFAULT 0,
+    currency       TEXT NOT NULL DEFAULT '₴',
+    cycle          TEXT NOT NULL DEFAULT 'monthly',  -- monthly|yearly|weekly
+    next_date      TEXT NOT NULL,                     -- YYYY-MM-DD (локальна дата оплати)
+    trial_end      TEXT,                              -- YYYY-MM-DD або NULL
+    remind_days    INTEGER NOT NULL DEFAULT 2,        -- за скільки днів нагадати про оплату
+    active         INTEGER NOT NULL DEFAULT 1,
+    pay_reminded   TEXT,                              -- next_date, для якого вже нагадали
+    trial_reminded INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reminders (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id        INTEGER NOT NULL,
@@ -86,6 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(active, fire_at);
 CREATE INDEX IF NOT EXISTS idx_checklists_user ON checklists(user_id);
 CREATE INDEX IF NOT EXISTS idx_items_checklist ON checklist_items(checklist_id);
 CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id);
+CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_subs_active ON subscriptions(active);
 """
 
 # Колонки, які могли з'явитися пізніше — для оновлення старих баз на сервері.
@@ -293,6 +311,12 @@ async def search_notes(user_id: int, query: str) -> list[aiosqlite.Row]:
     return await cur.fetchall()
 
 
+async def delete_all_notes(user_id: int) -> int:
+    cur = await db().execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+    await db().commit()
+    return cur.rowcount
+
+
 # ------------------------------------------------------------ reminders
 
 async def add_reminder(
@@ -380,6 +404,14 @@ async def count_active_reminders(user_id: int) -> int:
         (user_id,),
     )
     return (await cur.fetchone())["c"]
+
+
+async def delete_all_reminders(user_id: int) -> int:
+    cur = await db().execute(
+        "DELETE FROM reminders WHERE user_id = ? AND active = 1", (user_id,)
+    )
+    await db().commit()
+    return cur.rowcount
 
 
 # ----------------------------------------------------------- checklists
@@ -489,3 +521,59 @@ async def delete_template(user_id: int, template_id: int) -> None:
         "DELETE FROM templates WHERE id = ? AND user_id = ?", (template_id, user_id)
     )
     await db().commit()
+
+
+# -------------------------------------------------------- subscriptions
+
+async def add_subscription(
+    user_id: int, name: str, amount: float, currency: str, cycle: str,
+    next_date: str, trial_end: Optional[str] = None, remind_days: int = 2,
+) -> int:
+    cur = await db().execute(
+        "INSERT INTO subscriptions "
+        "(user_id, name, amount, currency, cycle, next_date, trial_end, "
+        " remind_days, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, name, amount, currency, cycle, next_date, trial_end,
+         remind_days, _now()),
+    )
+    await db().commit()
+    return cur.lastrowid
+
+
+async def list_subscriptions(user_id: int) -> list[aiosqlite.Row]:
+    cur = await db().execute(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND active = 1 "
+        "ORDER BY next_date ASC",
+        (user_id,),
+    )
+    return await cur.fetchall()
+
+
+async def get_subscription(user_id: int, sub_id: int) -> Optional[aiosqlite.Row]:
+    cur = await db().execute(
+        "SELECT * FROM subscriptions WHERE id = ? AND user_id = ?", (sub_id, user_id)
+    )
+    return await cur.fetchone()
+
+
+async def update_subscription(sub_id: int, field: str, value) -> None:
+    assert field in (
+        "name", "amount", "currency", "cycle", "next_date", "trial_end",
+        "remind_days", "active", "pay_reminded", "trial_reminded",
+    )
+    await db().execute(
+        f"UPDATE subscriptions SET {field} = ? WHERE id = ?", (value, sub_id)
+    )
+    await db().commit()
+
+
+async def delete_subscription(user_id: int, sub_id: int) -> None:
+    await db().execute(
+        "DELETE FROM subscriptions WHERE id = ? AND user_id = ?", (sub_id, user_id)
+    )
+    await db().commit()
+
+
+async def all_active_subscriptions() -> list[aiosqlite.Row]:
+    cur = await db().execute("SELECT * FROM subscriptions WHERE active = 1")
+    return await cur.fetchall()

@@ -27,6 +27,7 @@ async def set_commands(bot: Bot) -> None:
             BotCommand(command="start", description="Головне меню"),
             BotCommand(command="reminders", description="Мої нагадування"),
             BotCommand(command="notes", description="Мої нотатки"),
+            BotCommand(command="subs", description="Підписки"),
             BotCommand(command="checklists", description="Чеклісти"),
             BotCommand(command="templates", description="Шаблони"),
             BotCommand(command="deadline", description="Новий дедлайн"),

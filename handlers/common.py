@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 import database as db
 from keyboards import main_menu, reminder_card
@@ -42,14 +42,16 @@ HELP_TEXT = (
     "Текст без часу збережу як нотатку. Можна надсилати <b>фото, голосові, файли</b> "
     "або <b>пересилати</b> будь-яке повідомлення — все потрапить у нотатки.\n\n"
     "<b>Ще можливості</b>\n"
+    "• 💳 <b>Підписки</b> — облік платних сервісів, статистика витрат, "
+    "нагадування про оплату й кінець пробного періоду\n"
     "• ✅ <b>Чеклісти</b> — списки справ із галочками\n"
     "• 🎯 <b>Дедлайн</b> — нагадаю за тиждень / 3 дні / день / у день\n"
     "• ⭐ <b>Шаблони</b> — збережені фрази для швидких нагадувань\n"
     "• 🌅 <b>Ранковий дайджест</b> — план на день щоранку (у ⚙️ Налаштуваннях)\n\n"
     "<b>Команди</b>\n"
     "/start — меню · /help — довідка\n"
-    "/reminders · /notes · /checklists · /templates\n"
-    "/deadline · /today · /stats\n"
+    "/reminders · /notes · /subs · /checklists · /templates\n"
+    "/deadline · /today · /stats · /substats\n"
     "/settings — налаштування · /tz — часовий пояс\n"
 )
 
@@ -117,6 +119,11 @@ async def cmd_stats(message: Message) -> None:
         f"📝 Нотаток: <b>{notes}</b>\n",
         reply_markup=main_menu(),
     )
+
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(call: CallbackQuery) -> None:
+    await call.answer()
 
 
 @router.message(F.text == "↩️ Скасувати")
