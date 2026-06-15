@@ -22,7 +22,9 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import database as db
+from alerts_service import regenerate_by_id
 from keyboards import fired_actions
+from utils.alerts import ALERT_LABEL
 from utils.format import PRIORITY_TAG, fmt_dt
 from utils.timeparse import REPEAT_LABELS, advance_until_future
 
@@ -59,6 +61,10 @@ async def poll_due(now: datetime | None = None) -> None:
             await fire_one(r, now)
         except Exception as e:
             log.exception("Помилка спрацювання нагадування %s: %s", r["id"], e)
+    try:
+        await _fire_alerts(now)
+    except Exception as e:
+        log.exception("Помилка завчасних попереджень: %s", e)
     try:
         await _check_digests(now)
     except Exception as e:
@@ -239,5 +245,24 @@ async def fire_one(r, now: datetime) -> None:
         tz = await db.get_tz(r["user_id"])
         new_base = advance_until_future(base_at, r["repeat"], tz, now)
         await db.set_cycle(r["id"], new_base, new_base, total)
+        await regenerate_by_id(r["id"])  # попередження для наступного періоду
     else:
         await db.deactivate_reminder(r["id"])
+
+
+async def _fire_alerts(now: datetime) -> None:
+    """Надсилає завчасні попередження (вечір/ранок/година), час яких настав."""
+    assert _bot is not None
+    rows = await db.due_alerts(now)
+    for a in rows:
+        tz = await db.get_tz(a["user_id"])
+        label = ALERT_LABEL.get(a["kind"], "🔔 Нагадування")
+        when = fmt_dt(a["base_at"], tz)
+        try:
+            await _bot.send_message(
+                a["user_id"],
+                f"{label} нагадування:\n\n<b>{a['text']}</b>\n🕒 {when}",
+            )
+        except Exception as e:
+            log.warning("Не вдалося надіслати попередження %s: %s", a["alert_id"], e)
+        await db.delete_alert(a["alert_id"])

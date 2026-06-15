@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS users (
     def_priority INTEGER NOT NULL DEFAULT 1,   -- 0 тихо | 1 звичайно | 2 важливо
     done_count   INTEGER NOT NULL DEFAULT 0,   -- лічильник виконаних
     digest_time  TEXT,                          -- HH:MM локального часу або NULL (вимкнено)
-    digest_last  TEXT                           -- дата останнього надісланого дайджесту (YYYY-MM-DD)
+    digest_last  TEXT,                           -- дата останнього надісланого дайджесту (YYYY-MM-DD)
+    evening_hour INTEGER NOT NULL DEFAULT 21,    -- година вечірнього попередження
+    morning_hour INTEGER NOT NULL DEFAULT 8,     -- година ранкового попередження
+    auto_advance INTEGER NOT NULL DEFAULT 1      -- авто-додавати вечір+ранок до нових нагадувань
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -92,8 +95,17 @@ CREATE TABLE IF NOT EXISTS reminders (
     notify_count   INTEGER NOT NULL DEFAULT 2,     -- скільки сповіщень за одне спрацювання
     notify_interval INTEGER NOT NULL DEFAULT 10,   -- хвилин між сповіщеннями
     pings_left     INTEGER NOT NULL DEFAULT 2,     -- скільки сповіщень лишилось у поточному циклі
+    alert_kinds    TEXT NOT NULL DEFAULT '',       -- завчасні попередження: evening,morning,hour,day
     active         INTEGER NOT NULL DEFAULT 1,
     created_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reminder_alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    reminder_id INTEGER NOT NULL,
+    kind        TEXT NOT NULL,        -- evening|morning|hour|day
+    fire_at     TEXT NOT NULL         -- ISO UTC
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
@@ -104,6 +116,8 @@ CREATE INDEX IF NOT EXISTS idx_items_checklist ON checklist_items(checklist_id);
 CREATE INDEX IF NOT EXISTS idx_templates_user ON templates(user_id);
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_subs_active ON subscriptions(active);
+CREATE INDEX IF NOT EXISTS idx_alerts_due ON reminder_alerts(fire_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_rem ON reminder_alerts(reminder_id);
 """
 
 # Колонки, які могли з'явитися пізніше — для оновлення старих баз на сервері.
@@ -115,6 +129,9 @@ _MIGRATIONS = {
         ("done_count", "INTEGER NOT NULL DEFAULT 0"),
         ("digest_time", "TEXT"),
         ("digest_last", "TEXT"),
+        ("evening_hour", "INTEGER NOT NULL DEFAULT 21"),
+        ("morning_hour", "INTEGER NOT NULL DEFAULT 8"),
+        ("auto_advance", "INTEGER NOT NULL DEFAULT 1"),
     ],
     "reminders": [
         ("base_at", "TEXT"),
@@ -122,6 +139,7 @@ _MIGRATIONS = {
         ("notify_count", "INTEGER NOT NULL DEFAULT 2"),
         ("notify_interval", "INTEGER NOT NULL DEFAULT 10"),
         ("pings_left", "INTEGER NOT NULL DEFAULT 1"),
+        ("alert_kinds", "TEXT NOT NULL DEFAULT ''"),
     ],
     "notes": [
         ("media_type", "TEXT"),
@@ -206,7 +224,10 @@ async def set_tz(user_id: int, tz: str) -> None:
 
 
 async def set_user_default(user_id: int, field: str, value: int) -> None:
-    assert field in ("def_count", "def_interval", "def_priority")
+    assert field in (
+        "def_count", "def_interval", "def_priority",
+        "evening_hour", "morning_hour", "auto_advance",
+    )
     await db().execute(
         f"UPDATE users SET {field} = ? WHERE user_id = ?", (value, user_id)
     )
@@ -387,12 +408,18 @@ async def set_config(
 
 async def deactivate_reminder(reminder_id: int) -> None:
     await db().execute("UPDATE reminders SET active = 0 WHERE id = ?", (reminder_id,))
+    await db().execute(
+        "DELETE FROM reminder_alerts WHERE reminder_id = ?", (reminder_id,)
+    )
     await db().commit()
 
 
 async def delete_reminder(user_id: int, reminder_id: int) -> bool:
     cur = await db().execute(
         "DELETE FROM reminders WHERE id = ? AND user_id = ?", (reminder_id, user_id)
+    )
+    await db().execute(
+        "DELETE FROM reminder_alerts WHERE reminder_id = ?", (reminder_id,)
     )
     await db().commit()
     return cur.rowcount > 0
@@ -407,11 +434,64 @@ async def count_active_reminders(user_id: int) -> int:
 
 
 async def delete_all_reminders(user_id: int) -> int:
+    await db().execute(
+        "DELETE FROM reminder_alerts WHERE user_id = ?", (user_id,)
+    )
     cur = await db().execute(
         "DELETE FROM reminders WHERE user_id = ? AND active = 1", (user_id,)
     )
     await db().commit()
     return cur.rowcount
+
+
+# ----------------------------------------------- завчасні попередження
+
+async def set_alert_kinds(reminder_id: int, kinds: str) -> None:
+    await db().execute(
+        "UPDATE reminders SET alert_kinds = ? WHERE id = ?", (kinds, reminder_id)
+    )
+    await db().commit()
+
+
+async def clear_alerts(reminder_id: int) -> None:
+    await db().execute(
+        "DELETE FROM reminder_alerts WHERE reminder_id = ?", (reminder_id,)
+    )
+    await db().commit()
+
+
+async def add_alert(user_id: int, reminder_id: int, kind: str, fire_at_utc) -> None:
+    await db().execute(
+        "INSERT INTO reminder_alerts (user_id, reminder_id, kind, fire_at) "
+        "VALUES (?, ?, ?, ?)",
+        (user_id, reminder_id, kind, fire_at_utc.isoformat()),
+    )
+    await db().commit()
+
+
+async def due_alerts(now_utc) -> list[aiosqlite.Row]:
+    """Прострочені попередження разом із даними нагадування."""
+    cur = await db().execute(
+        "SELECT a.id AS alert_id, a.kind, a.fire_at, a.user_id, "
+        "       r.text, r.base_at, r.id AS reminder_id "
+        "FROM reminder_alerts a JOIN reminders r ON r.id = a.reminder_id "
+        "WHERE a.fire_at <= ? AND r.active = 1",
+        (now_utc.isoformat(),),
+    )
+    return await cur.fetchall()
+
+
+async def delete_alert(alert_id: int) -> None:
+    await db().execute("DELETE FROM reminder_alerts WHERE id = ?", (alert_id,))
+    await db().commit()
+
+
+async def alerts_for(reminder_id: int) -> list[aiosqlite.Row]:
+    cur = await db().execute(
+        "SELECT * FROM reminder_alerts WHERE reminder_id = ? ORDER BY fire_at ASC",
+        (reminder_id,),
+    )
+    return await cur.fetchall()
 
 
 # ----------------------------------------------------------- checklists

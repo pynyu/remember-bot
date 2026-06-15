@@ -23,6 +23,8 @@ from keyboards import (
 )
 
 DIGEST_TIMES = ["06:30", "07:00", "08:00", "09:00", "10:00", "21:00"]
+EVENING_HOURS = [18, 19, 20, 21, 22]
+MORNING_HOURS = [6, 7, 8, 9, 10]
 from states import SetTimezone
 from utils.format import PRIORITY_LABEL
 
@@ -41,12 +43,15 @@ POPULAR_TZ = [
 
 SETTINGS_HEADER = (
     "⚙️ <b>Налаштування</b>\n\n"
-    "Це значення за замовчуванням для <b>нових</b> нагадувань. Кожне окреме "
+    "Значення за замовчуванням для <b>нових</b> нагадувань. Кожне окреме "
     "нагадування можна підлаштувати кнопками під ним.\n\n"
-    "• <b>Повторів</b> — скільки разів надсилати сповіщення (корисно, якщо телефон "
-    "беззвучний — більший шанс помітити).\n"
-    "• <b>Інтервал</b> — пауза між повторами.\n"
-    "• <b>Звук</b> — 🔔 зі звуком / 🔇 тихо / 🔴 важливо."
+    "• <b>Повторів / інтервал</b> — скільки разів і як часто пінгувати, поки не "
+    "натиснеш «Готово» (рятує, коли телефон беззвучний).\n"
+    "• <b>Звук</b> — 🔔 зі звуком / 🔇 тихо / 🔴 важливо.\n"
+    "• <b>Авто-попередження</b> — до кожного нового нагадування з часом автоматично "
+    "додавати нагадування <b>напередодні ввечері</b> та <b>зранку</b>, щоб не "
+    "проспати подію.\n"
+    "• <b>Вечірнє / ранкове</b> — о котрій годині надсилати ці попередження."
 )
 
 
@@ -92,6 +97,32 @@ async def cb_def_prio(call: CallbackQuery) -> None:
     await db.set_user_default(call.from_user.id, "def_priority", new)
     await _show_settings(call, await db.get_user(call.from_user.id))
     await call.answer(PRIORITY_LABEL[new])
+
+
+@router.callback_query(F.data == "scfg_auto")
+async def cb_auto(call: CallbackQuery) -> None:
+    user = await db.get_user(call.from_user.id)
+    await db.set_user_default(call.from_user.id, "auto_advance", 0 if user["auto_advance"] else 1)
+    await _show_settings(call, await db.get_user(call.from_user.id))
+    await call.answer()
+
+
+@router.callback_query(F.data == "scfg_evening")
+async def cb_evening(call: CallbackQuery) -> None:
+    user = await db.get_user(call.from_user.id)
+    new = cycle(EVENING_HOURS, user["evening_hour"])
+    await db.set_user_default(call.from_user.id, "evening_hour", new)
+    await _show_settings(call, await db.get_user(call.from_user.id))
+    await call.answer(f"Вечірнє о {new:02d}:00")
+
+
+@router.callback_query(F.data == "scfg_morning")
+async def cb_morning(call: CallbackQuery) -> None:
+    user = await db.get_user(call.from_user.id)
+    new = cycle(MORNING_HOURS, user["morning_hour"])
+    await db.set_user_default(call.from_user.id, "morning_hour", new)
+    await _show_settings(call, await db.get_user(call.from_user.id))
+    await call.answer(f"Ранкове о {new:02d}:00")
 
 
 @router.callback_query(F.data == "scfg_digest")

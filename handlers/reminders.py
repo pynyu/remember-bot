@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import database as db
+from alerts_service import regenerate, regenerate_by_id
 from keyboards import (
     COUNT_OPTIONS,
     INTERVAL_OPTIONS,
@@ -21,6 +22,7 @@ from keyboards import (
     reminder_card,
 )
 from states import AddReminder
+from utils.alerts import ALERT_LABEL, join_kinds, parse_kinds
 from utils.format import PRIORITY_LABEL, fmt_dt, human_left
 from utils.timeparse import (
     REPEAT_LABELS,
@@ -30,6 +32,16 @@ from utils.timeparse import (
 )
 
 router = Router()
+
+
+async def _alert_summary(reminder_id: int, tz: str) -> str:
+    rows = await db.alerts_for(reminder_id)
+    if not rows:
+        return ""
+    parts = []
+    for a in rows:
+        parts.append(f"{ALERT_LABEL.get(a['kind'], a['kind'])} {fmt_dt(a['fire_at'], tz)}")
+    return "\n🔔 Попередження:\n" + "\n".join(f"   • {p}" for p in parts)
 
 
 async def build_reminder(user_id: int, text: str):
@@ -53,7 +65,15 @@ async def build_reminder(user_id: int, text: str):
         user_id, clean or "Нагадування", fire_at_utc,
         repeat, prio, notify_count, notify_interval,
     )
+
+    # Авто-попередження: для одноразових нагадувань додаємо «напередодні+вранці»,
+    # щоб не проспати ранкову подію. Лишаємо тільки доречні (майбутні) попередження.
+    if repeat == "none" and user["auto_advance"]:
+        await db.set_alert_kinds(rid, "evening,morning")
+        await regenerate(await db.get_reminder(rid), user)
+
     r = await db.get_reminder(rid)
+    alert_rows = await _alert_summary(rid, tz)
 
     repeat_note = "" if repeat == "none" else f"\n🔁 Повтор: {REPEAT_LABELS[repeat]}"
     ping_note = (
@@ -63,7 +83,7 @@ async def build_reminder(user_id: int, text: str):
     confirm = (
         f"✅ Нагадаю: <b>{clean}</b>\n"
         f"🕒 {fmt_dt(fire_at_utc.isoformat(), tz)} ({human_left(fire_at_utc.isoformat(), tz)})"
-        f"{repeat_note}{ping_note}\n\n"
+        f"{repeat_note}{ping_note}{alert_rows}\n\n"
         f"<i>Налаштуй кнопками нижче ⤵️</i>"
     )
     return confirm, reminder_card(r)
@@ -154,6 +174,17 @@ async def cb_rems_page(call: CallbackQuery) -> None:
     await call.answer()
 
 
+async def _card_text(r, tz: str) -> str:
+    repeat_note = "" if r["repeat"] == "none" else f" · 🔁 {REPEAT_LABELS[r['repeat']]}"
+    prio = "🔴 " if r["priority"] == 2 else ("🔇 " if r["priority"] == 0 else "")
+    summary = await _alert_summary(r["id"], tz)
+    return (
+        f"{prio}<b>{r['text']}</b>\n"
+        f"🕒 {fmt_dt(r['base_at'], tz)} ({human_left(r['base_at'], tz)}){repeat_note}"
+        f"{summary}"
+    )
+
+
 @router.callback_query(F.data.startswith("rem_open:"))
 async def cb_rem_open(call: CallbackQuery) -> None:
     rid = int(call.data.split(":")[1])
@@ -162,13 +193,7 @@ async def cb_rem_open(call: CallbackQuery) -> None:
         await call.answer("Нагадування вже неактивне.", show_alert=True)
         return
     tz = await db.get_tz(call.from_user.id)
-    repeat_note = "" if r["repeat"] == "none" else f" · 🔁 {REPEAT_LABELS[r['repeat']]}"
-    prio = "🔴 " if r["priority"] == 2 else ("🔇 " if r["priority"] == 0 else "")
-    await call.message.answer(
-        f"{prio}<b>{r['text']}</b>\n"
-        f"🕒 {fmt_dt(r['base_at'], tz)} ({human_left(r['base_at'], tz)}){repeat_note}",
-        reply_markup=reminder_card(r),
-    )
+    await call.message.answer(await _card_text(r, tz), reply_markup=reminder_card(r))
     await call.answer()
 
 
@@ -197,11 +222,37 @@ async def cb_rems_clear_yes(call: CallbackQuery) -> None:
 
 async def _refresh_card(call: CallbackQuery, rid: int) -> None:
     r = await db.get_reminder(rid)
-    if r:
+    if not r:
+        return
+    tz = await db.get_tz(call.from_user.id)
+    try:
+        await call.message.edit_text(await _card_text(r, tz), reply_markup=reminder_card(r))
+    except Exception:
         try:
             await call.message.edit_reply_markup(reply_markup=reminder_card(r))
         except Exception:
             pass
+
+
+@router.callback_query(F.data.startswith("ralert:"))
+async def cb_alert_toggle(call: CallbackQuery) -> None:
+    _, rid_s, kind = call.data.split(":")
+    rid = int(rid_s)
+    r = await db.get_reminder(rid)
+    if not r:
+        await call.answer("Нагадування вже немає.", show_alert=True)
+        return
+    kinds = parse_kinds(r["alert_kinds"])
+    if kind in kinds:
+        kinds.remove(kind)
+        msg = "Попередження вимкнено"
+    else:
+        kinds.append(kind)
+        msg = "Попередження додано"
+    await db.set_alert_kinds(rid, join_kinds(kinds))
+    await regenerate_by_id(rid)
+    await _refresh_card(call, rid)
+    await call.answer(msg)
 
 
 @router.callback_query(F.data.startswith("rcfg_count:"))
@@ -267,6 +318,7 @@ async def cb_done_reminder(call: CallbackQuery) -> None:
         base = datetime.fromisoformat(r["base_at"])
         new_base = advance_until_future(base, r["repeat"], tz, now)
         await db.set_cycle(rid, new_base, new_base, r["notify_count"])
+        await regenerate_by_id(rid)
         await call.message.edit_text(
             f"✅ Виконано! 🎉\nНаступне: {fmt_dt(new_base.isoformat(), tz)}"
         )
@@ -287,6 +339,7 @@ async def cb_snooze(call: CallbackQuery) -> None:
     new_fire = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     # перезапускаємо цикл сповіщень із новим часом
     await db.set_cycle(rid, new_fire, new_fire, r["notify_count"])
+    await regenerate_by_id(rid)
     tz = await db.get_tz(call.from_user.id)
     await call.message.edit_text(
         f"😴 Відкладено.\nНагадаю ще раз: {fmt_dt(new_fire.isoformat(), tz)}"

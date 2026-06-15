@@ -80,23 +80,21 @@ def main_menu() -> ReplyKeyboardMarkup:
 
 
 def reminder_card(reminder) -> InlineKeyboardMarkup:
-    """Кнопки під карткою нагадування: налаштування повторів/звуку + видалення."""
+    """Кнопки під карткою нагадування: завчасні попередження, повтори/звук, видалення."""
     rid = reminder["id"]
+    kinds = (reminder["alert_kinds"] or "").split(",")
+    ev = "🌙 Напередодні ✅" if "evening" in kinds else "🌙 Напередодні"
+    mo = "☀️ Вранці ✅" if "morning" in kinds else "☀️ Вранці"
+    hr = "⏰ За годину ✅" if "hour" in kinds else "⏰ За годину"
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"🔁 Повторів: {reminder['notify_count']}",
-        callback_data=f"rcfg_count:{rid}",
-    )
-    kb.button(
-        text=f"⏱ Інтервал: {fmt_interval(reminder['notify_interval'])}",
-        callback_data=f"rcfg_int:{rid}",
-    )
-    kb.button(
-        text=PRIORITY_LABEL[reminder["priority"]],
-        callback_data=f"rcfg_prio:{rid}",
-    )
+    kb.button(text=ev, callback_data=f"ralert:{rid}:evening")
+    kb.button(text=mo, callback_data=f"ralert:{rid}:morning")
+    kb.button(text=hr, callback_data=f"ralert:{rid}:hour")
+    kb.button(text=f"🔁 Повторів: {reminder['notify_count']}", callback_data=f"rcfg_count:{rid}")
+    kb.button(text=f"⏱ Інтервал: {fmt_interval(reminder['notify_interval'])}", callback_data=f"rcfg_int:{rid}")
+    kb.button(text=PRIORITY_LABEL[reminder["priority"]], callback_data=f"rcfg_prio:{rid}")
     kb.button(text="🗑 Видалити", callback_data=f"rem_del:{rid}")
-    kb.adjust(2, 2)
+    kb.adjust(3, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -144,10 +142,14 @@ def settings_kb(user) -> InlineKeyboardMarkup:
         text=f"Звук за замовч.: {PRIORITY_LABEL[user['def_priority']]}",
         callback_data="scfg_prio",
     )
+    auto = "увімкнено ✅" if user["auto_advance"] else "вимкнено"
+    kb.button(text=f"🌙 Авто-попередження (вечір+ранок): {auto}", callback_data="scfg_auto")
+    kb.button(text=f"🕘 Вечірнє о {user['evening_hour']:02d}:00", callback_data="scfg_evening")
+    kb.button(text=f"🌅 Ранкове о {user['morning_hour']:02d}:00", callback_data="scfg_morning")
     digest = user["digest_time"] if user["digest_time"] else "вимк."
-    kb.button(text=f"🌅 Ранковий дайджест: {digest}", callback_data="scfg_digest")
+    kb.button(text=f"📰 Ранковий дайджест: {digest}", callback_data="scfg_digest")
     kb.button(text="🌍 Часовий пояс", callback_data="scfg_tz")
-    kb.adjust(1, 1, 1, 1, 1)
+    kb.adjust(1, 1, 1, 1, 1, 1, 1, 1)
     return kb.as_markup()
 
 
